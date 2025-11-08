@@ -12,6 +12,8 @@ import os
 import matplotlib.pyplot as plt
 from pathlib import Path
 import time
+import json
+import os
 from src.face_detector import FaceDetector
 from src.feature_extractor import FeatureExtractor
 from src.utils import load_model, save_model, create_directory
@@ -201,7 +203,7 @@ st.markdown("<div class='sub-header'>Using Support Vector Machine (SVM)</div>", 
 st.sidebar.title("Navigation")
 page = st.sidebar.radio(
     "Go to",
-    ["Home", "Add Student", "Train Model", "Face Recognition"]
+    ["Home", "View Students", "Add Student", "Train Model", "Face Recognition"]
 )
 
 if page == "Train Model":
@@ -232,58 +234,71 @@ if page == "Train Model":
     # Start training button
     if st.button("🎯 Start Training", type="primary"):
         if not os.path.exists("data/raw") or not any(os.scandir("data/raw")):
-            st.error("No training data found. Please add students first.")
+            st.error("❌ No training data found. Please add students first.")
         else:
-            with st.spinner("Training in progress. This may take a few minutes..."):
-                try:
-                    # Create a placeholder for training output
-                    output = st.empty()
-                    
-                    # Redirect stdout to capture training output
-                    import sys
-                    from io import StringIO
-                    
-                    old_stdout = sys.stdout
-                    sys.stdout = StringIO()
-                    
-                    # Import and run training
-                    from src.train_face_recognition import train_face_recognition_model
-                    
-                    model_path = "models/face_recognition_model.pkl"
-                    model, le, test_accuracy = train_face_recognition_model(
-                        data_dir="data/raw",
-                        model_save_path=model_path if save_model_file else None,
-                        test_size=test_size,
-                        random_state=random_state,
-                        min_samples=min_samples
-                    )
-                    
-                    # Get the captured output
-                    training_output = sys.stdout.getvalue()
-                    sys.stdout = old_stdout
-                    
-                    # Display training output
-                    if show_details:
-                        with st.expander("Training Details", expanded=True):
-                            st.code(training_output)
-                    
-                    # Show success message
-                    st.success(f"✅ Model trained successfully! Test accuracy: {test_accuracy:.2%}")
-                    
-                    # Show confusion matrix if available
-                    cm_path = "reports/figures/confusion_matrix.png"
-                    if os.path.exists(cm_path):
-                        st.image(cm_path, caption="Confusion Matrix", 
-                                use_column_width=True)
-                    
-                    # Update session state
-                    st.session_state.model_trained = True
-                    st.session_state.model_accuracy = test_accuracy
-                    
-                except Exception as e:
-                    sys.stdout = old_stdout
-                    st.error(f"❌ Training failed: {str(e)}")
-                    st.exception(e)  # Show full traceback for debugging
+            # Check if we have at least 2 different people with images
+            data_dir = Path("data/raw")
+            student_dirs = [d for d in data_dir.iterdir() 
+                          if d.is_dir() and (any(d.glob("*.jpg")) or any(d.glob("*.png")))]
+            
+            if len(student_dirs) < 2:
+                st.error("❌ You need at least 2 different people with face images to train the model.")
+                st.info(f"Currently, you have {len(student_dirs)} {'person' if len(student_dirs) == 1 else 'people'} with images.")
+                st.info("Please add more students using the 'Add Student' page and capture their face images.")
+            else:
+                with st.spinner("Training in progress. This may take a few minutes..."):
+                    try:
+                        # Suppress output during training
+                        import sys
+                        from io import StringIO
+                        old_stdout = sys.stdout
+                        sys.stdout = StringIO()
+                        
+                        # Import and run training
+                        from src.train_face_recognition import train_face_recognition_model
+                        
+                        model_path = "models/face_recognition_model.pkl"
+                        os.makedirs("models", exist_ok=True)
+                        
+                        # Train the model
+                        model, le, test_accuracy = train_face_recognition_model(
+                            data_dir="data/raw",
+                            model_save_path=model_path if save_model_file else None,
+                            test_size=test_size,
+                            random_state=42,
+                            min_samples=min_samples
+                        )
+                        
+                        # Restore stdout
+                        sys.stdout = old_stdout
+                        
+                        # Show success message
+                        st.success(f"✅ Model trained successfully! Test accuracy: {test_accuracy*100:.2f}%")
+                        
+                        # Show model info
+                        st.subheader("Model Information")
+                        st.write(f"- Number of classes: {len(le.classes_)}")
+                        st.write(f"- Classes: {', '.join(le.classes_)}")
+                        st.write(f"- Model saved to: {os.path.abspath(model_path) if save_model_file else 'Not saved'}")
+                        
+                        # Show confusion matrix if available
+                        cm_path = "reports/figures/confusion_matrix.png"
+                        if os.path.exists(cm_path):
+                            st.image(cm_path, caption="Confusion Matrix", 
+                                    use_column_width=True)
+                        
+                        # Update session state
+                        st.session_state.model_trained = True
+                        st.session_state.model_accuracy = test_accuracy
+                        
+                    except Exception as e:
+                        sys.stdout = old_stdout if 'old_stdout' in locals() else sys.__stdout__
+                        st.error(f"❌ Training failed: {str(e)}")
+                        if "No valid classes found" in str(e) or "number of classes" in str(e).lower():
+                            st.info("Please make sure you have at least 2 different people with face images in the 'data/raw' directory.")
+                            st.info("Each person should have their own folder with their name, containing their face images.")
+                        else:
+                            st.exception(e)  # Show full traceback for debugging
     
     # Show model info if available
     model_path = "models/face_recognition_model.pkl"
@@ -327,17 +342,42 @@ elif page == "Add Student":
     data_dir.mkdir(parents=True, exist_ok=True)
     
     # Get list of existing students
-    existing_students = [d.name for d in data_dir.iterdir() if d.is_dir()]
+    existing_students = {}
+    for d in data_dir.iterdir():
+        if d.is_dir():
+            # Try to find a metadata file or use folder name
+            meta_file = d / "metadata.json"
+            if meta_file.exists():
+                try:
+                    with open(meta_file, 'r') as f:
+                        meta = json.load(f)
+                        display_name = f"{meta.get('name', d.name)} ({d.name})"
+                        existing_students[display_name] = str(d.name)
+                except:
+                    existing_students[d.name] = d.name
+            else:
+                existing_students[d.name] = d.name
     
     # Student info form
     with st.form("student_form"):
         st.subheader("Student Information")
         
-        # Student ID (required)
-        student_id = st.text_input("Student ID*", help="Unique identifier for the student")
+        # Select existing student or add new
+        student_option = st.selectbox(
+            "Select existing student or add new",
+            ["Add New Student"] + list(existing_students.keys())
+        )
         
-        # Student name (optional)
-        student_name = st.text_input("Student Name", help="Full name of the student (optional)")
+        if student_option == "Add New Student":
+            # Student ID (required for new students)
+            student_id = st.text_input("Student ID*", help="Unique identifier for the student")
+            student_name = st.text_input("Student Name*", help="Full name of the student")
+            is_new_student = True
+        else:
+            student_id = existing_students[student_option]
+            student_name = student_option.split(' (')[0]  # Extract name from display format
+            st.info(f"Selected student: {student_name} (ID: {student_id})")
+            is_new_student = False
         
         # Number of images to capture
         num_images = st.slider("Number of images to capture", 5, 50, 20, 5,
@@ -348,14 +388,23 @@ elif page == "Add Student":
     
     # Process form submission
     if submitted:
-        if not student_id:
-            st.error("Please enter a student ID")
-        elif student_id in existing_students:
-            st.warning(f"Student ID '{student_id}' already exists. Please use a different ID.")
+        if not student_id or (is_new_student and not student_name):
+            st.error("Please fill in all required fields")
+        elif is_new_student and student_id in [d.name for d in data_dir.iterdir() if d.is_dir()]:
+            st.warning(f"Student ID '{student_id}' already exists. Please use a different ID or select the existing student.")
         else:
-            # Create student directory
-            student_dir = data_dir / student_id
+            # Create student directory using student name (or ID if name not provided)
+            safe_name = "".join([c if c.isalnum() or c in ' _-' else '_' for c in student_name.strip()])
+            if not safe_name:
+                safe_name = student_id
+            
+            student_dir = data_dir / safe_name
             student_dir.mkdir(exist_ok=True)
+            
+            # Save metadata
+            meta_file = student_dir / "metadata.json"
+            with open(meta_file, 'w') as f:
+                json.dump({"id": student_id, "name": student_name}, f)
             
             # Initialize webcam
             cap = cv2.VideoCapture(0)
@@ -693,6 +742,77 @@ elif page == "Face Recognition":
     # Add some space at the bottom
     st.markdown("\n\n---\n")
     st.markdown("💡 **Tip:** For best results, ensure good lighting and that faces are clearly visible.")
+
+elif page == "View Students":
+    st.title("👥 Student Gallery")
+    
+    # Get all student directories
+    data_dir = Path("data/raw")
+    student_dirs = [d for d in data_dir.iterdir() if d.is_dir()]
+    
+    if not student_dirs:
+        st.info("No students found. Add students using the 'Add Student' page.")
+    else:
+        # Sort students by name
+        student_dirs.sort(key=lambda x: x.name.lower())
+        
+        # Search and filter
+        search_term = st.text_input("🔍 Search students", "")
+        
+        # Display students in a grid
+        cols = st.columns(3)
+        
+        for idx, student_dir in enumerate(student_dirs):
+            # Check if student matches search term
+            if search_term.lower() not in student_dir.name.lower():
+                continue
+                
+            # Load student metadata
+            meta_file = student_dir / "metadata.json"
+            if meta_file.exists():
+                try:
+                    with open(meta_file, 'r') as f:
+                        meta = json.load(f)
+                        student_name = meta.get('name', student_dir.name)
+                        student_id = meta.get('id', 'N/A')
+                except:
+                    student_name = student_dir.name
+                    student_id = 'N/A'
+            else:
+                student_name = student_dir.name
+                student_id = 'N/A'
+            
+            # Get student images
+            image_files = list(student_dir.glob("*.jpg")) + list(student_dir.glob("*.png"))
+            
+            with cols[idx % 3]:
+                # Display student card
+                with st.expander(f"{student_name} (ID: {student_id})"):
+                    st.caption(f"{len(image_files)} images")
+                    
+                    # Show first 4 images in a grid
+                    if image_files:
+                        img_cols = st.columns(2)
+                        for i, img_path in enumerate(image_files[:4]):
+                            try:
+                                img = Image.open(img_path)
+                                img_cols[i % 2].image(img, use_column_width=True)
+                            except Exception as e:
+                                st.error(f"Error loading image: {e}")
+                    
+                    # Show total images and last modified
+                    if image_files:
+                        last_modified = time.ctime(os.path.getmtime(max(image_files, key=os.path.getmtime)))
+                        st.caption(f"Last updated: {last_modified}")
+                    
+                    # Add delete button
+                    if st.button(f"Delete {student_name}", key=f"del_{student_dir.name}"):
+                        try:
+                            import shutil
+                            shutil.rmtree(student_dir)
+                            st.experimental_rerun()
+                        except Exception as e:
+                            st.error(f"Error deleting student: {e}")
 
 elif page == "Home":
     st.title("🏠 Welcome to Face Recognition System")

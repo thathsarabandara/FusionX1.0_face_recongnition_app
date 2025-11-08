@@ -50,11 +50,6 @@ pip install -e ".[dev]"
 echo -e "\n${GREEN}Setting up directories...${NC}"
 mkdir -p data/raw data/processed models
 
-# Download pre-trained face detection model (if not exists)
-if [ ! -f "models/haarcascade_frontalface_default.xml" ]; then
-    echo -e "\n${GREEN}Downloading pre-trained face detection model...${NC}"
-    wget -P models/ https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml
-fi
 
 # Download sample dataset (if needed)
 if [ "$1" == "--download-sample" ]; then

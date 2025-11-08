@@ -262,9 +262,10 @@ def train_face_recognition_model(data_dir="data/raw", model_save_path="models/fa
     model_data = {
         'model': model,
         'label_encoder': le,
+        'feature_scaler': scaler,
         'classes': le.classes_.tolist(),
         'feature_extractor': 'hog',  
-        'training_date': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'training_date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'test_accuracy': test_accuracy,
         'num_classes': len(le.classes_),
         'min_samples': min_samples,
