@@ -57,3 +57,6 @@ htmlcov/
 *.tmp
 *.temp
 models
+data
+debug
+reports
