@@ -14,6 +14,7 @@ from pathlib import Path
 import time
 import json
 import os
+from datetime import datetime
 from src.face_detector import FaceDetector
 from src.feature_extractor import FeatureExtractor
 from src.utils import load_model, save_model, create_directory
@@ -341,47 +342,93 @@ elif page == "Add Student":
     data_dir = Path("data/raw")
     data_dir.mkdir(parents=True, exist_ok=True)
     
-    # Get list of existing students
+    # Get list of existing students with image counts and metadata
     existing_students = {}
     for d in data_dir.iterdir():
         if d.is_dir():
-            # Try to find a metadata file or use folder name
+            # Count image files
+            image_count = len([f for f in d.glob("*.jpg") if f.is_file()])
+            
+            # Try to load metadata
             meta_file = d / "metadata.json"
             if meta_file.exists():
                 try:
                     with open(meta_file, 'r') as f:
                         meta = json.load(f)
-                        display_name = f"{meta.get('name', d.name)} ({d.name})"
-                        existing_students[display_name] = str(d.name)
-                except:
-                    existing_students[d.name] = d.name
+                        display_name = f"{meta.get('name', d.name)} (ID: {meta.get('id', d.name)}) - {image_count} images"
+                        existing_students[display_name] = {
+                            "id": meta.get('id', d.name),
+                            "name": meta.get('name', d.name),
+                            "dir": str(d),
+                            "image_count": image_count,
+                            "metadata": meta
+                        }
+                except Exception as e:
+                    display_name = f"{d.name} - {image_count} images"
+                    existing_students[display_name] = {
+                        "id": d.name,
+                        "name": d.name,
+                        "dir": str(d),
+                        "image_count": image_count,
+                        "metadata": {}
+                    }
             else:
-                existing_students[d.name] = d.name
+                display_name = f"{d.name} - {image_count} images"
+                existing_students[display_name] = {
+                    "id": d.name,
+                    "name": d.name,
+                    "dir": str(d),
+                    "image_count": image_count,
+                    "metadata": {}
+                }
     
     # Student info form
     with st.form("student_form"):
         st.subheader("Student Information")
         
         # Select existing student or add new
+        student_options = ["Add New Student"] + list(existing_students.keys())
         student_option = st.selectbox(
             "Select existing student or add new",
-            ["Add New Student"] + list(existing_students.keys())
+            student_options,
+            format_func=lambda x: x.split(' (ID:')[0] if x != "Add New Student" else x
         )
         
         if student_option == "Add New Student":
-            # Student ID (required for new students)
-            student_id = st.text_input("Student ID*", help="Unique identifier for the student")
-            student_name = st.text_input("Student Name*", help="Full name of the student")
+            # New student form
+            col1, col2 = st.columns(2)
+            with col1:
+                student_id = st.text_input("Student ID*", help="Unique identifier for the student")
+            with col2:
+                student_name = st.text_input("Student Name*", help="Full name of the student")
+            
+            # Number of images to capture
+            num_images = st.slider("Number of images to capture", 5, 50, 20, 5,
+                                 help="More images will improve recognition accuracy")
+            
             is_new_student = True
+            existing_image_count = 0
         else:
-            student_id = existing_students[student_option]
-            student_name = student_option.split(' (')[0]  # Extract name from display format
-            st.info(f"Selected student: {student_name} (ID: {student_id})")
+            # Existing student info
+            student_info = existing_students[student_option]
+            student_id = student_info["id"]
+            student_name = student_info["name"]
+            existing_image_count = student_info["image_count"]
+            
+            # Display student info
+            st.info(f"""
+            **Selected Student**: {student_name}  
+            **Student ID**: {student_id}  
+            **Existing Images**: {existing_image_count}
+            
+            *You can add more images to improve recognition accuracy.*
+            """)
+            
+            # Option to capture more images
+            num_images = st.slider("Additional images to capture", 0, 30, 5, 1,
+                                 help="Add more images to improve recognition accuracy")
+            
             is_new_student = False
-        
-        # Number of images to capture
-        num_images = st.slider("Number of images to capture", 5, 50, 20, 5,
-                             help="More images will improve recognition accuracy")
         
         # Start capture button
         submitted = st.form_submit_button("Start Face Capture")
@@ -392,6 +439,8 @@ elif page == "Add Student":
             st.error("Please fill in all required fields")
         elif is_new_student and student_id in [d.name for d in data_dir.iterdir() if d.is_dir()]:
             st.warning(f"Student ID '{student_id}' already exists. Please use a different ID or select the existing student.")
+        elif not is_new_student and num_images == 0:
+            st.warning("Please select at least 1 image to capture for the existing student.")
         else:
             # Create student directory using student name (or ID if name not provided)
             safe_name = "".join([c if c.isalnum() or c in ' _-' else '_' for c in student_name.strip()])
@@ -401,10 +450,29 @@ elif page == "Add Student":
             student_dir = data_dir / safe_name
             student_dir.mkdir(exist_ok=True)
             
-            # Save metadata
+            # Save/update metadata
             meta_file = student_dir / "metadata.json"
+            student_data = {
+                "id": student_id,
+                "name": student_name,
+                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "total_images": existing_image_count + num_images
+            }
+            
+            # If updating existing student, preserve existing metadata
+            if not is_new_student and meta_file.exists():
+                try:
+                    with open(meta_file, 'r') as f:
+                        existing_data = json.load(f)
+                        student_data.update(existing_data)  # Preserve existing fields
+                        student_data["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        student_data["total_images"] = existing_image_count + num_images
+                except Exception as e:
+                    st.warning(f"Could not load existing metadata: {e}")
+            
+            # Save the metadata
             with open(meta_file, 'w') as f:
-                json.dump({"id": student_id, "name": student_name}, f)
+                json.dump(student_data, f, indent=2)
             
             # Initialize webcam
             cap = cv2.VideoCapture(0)
@@ -483,15 +551,28 @@ elif page == "Add Student":
             cap.release()
             
             if images_captured > 0:
+                # Update the image count in the metadata
+                if meta_file.exists():
+                    try:
+                        with open(meta_file, 'r') as f:
+                            meta = json.load(f)
+                        meta["total_images"] = len(list(student_dir.glob("*.jpg")))
+                        meta["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        with open(meta_file, 'w') as f:
+                            json.dump(meta, f, indent=2)
+                    except Exception as e:
+                        st.warning(f"Could not update metadata: {e}")
+                
                 st.success(f"✅ Successfully captured {images_captured} images for {student_name or student_id}")
                 st.balloons()
                 
                 # Show sample of captured images
                 st.subheader("Sample of Captured Images")
+                all_images = sorted(student_dir.glob("*.jpg"), key=os.path.getmtime, reverse=True)
                 cols = st.columns(4)
-                for i, img_path in enumerate(sorted(student_dir.glob("*.jpg"))[:4]):
+                for i, img_path in enumerate(all_images[:4]):
                     if i < len(cols):
-                        cols[i].image(str(img_path), use_column_width=True)
+                        cols[i].image(str(img_path), use_column_width=True, caption=f"Image {i+1}")
             else:
                 st.error("No images were captured. Please try again.")
 
